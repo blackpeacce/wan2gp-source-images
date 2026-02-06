@@ -1,0 +1,8 @@
+{
+  "name": "Source Images Metadata",
+  "author": "blackpeacce",
+  "version": "1.0.0",
+  "description": "Saves input image file paths in output metadata for later reuse (gallery integration, re-generation, etc.). REQUIRE MODIFIED WAN2GP.",
+  "date": "",
+  "wan2gp_version": ""
+}
