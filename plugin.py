@@ -20,15 +20,18 @@ import gradio as gr
 from shared.utils.plugins import WAN2GPPlugin
 from .utils import find_file_by_name
 
-# List of image input keys to track
-IMAGE_ATTACHMENT_KEYS = [
-    "image_start",      # Starting image for I2V
-    "image_end",        # End frame image
-    "image_refs",       # Reference images (list)
-    "image_guide",      # Control/guidance image (pose, depth, etc.)
-    "image_mask",       # Mask image for inpainting
-    "custom_guide",     # Custom guidance input
-]
+# List of image input keys to track and their required flags
+# Format: key -> (flag_source, required_flag)
+# flag_source: "image" = check image_prompt_type, "video" = check video_prompt_type
+# required_flag: the character that must be present for this input to be used
+IMAGE_ATTACHMENT_KEYS = {
+    "image_start": ("image", "S"),      # Starting image for I2V - requires "S" in image_prompt_type
+    "image_end": ("image", "E"),        # End frame image - requires "E" in image_prompt_type
+    "image_refs": ("video", "I"),       # Reference images - requires "I" in video_prompt_type
+    "image_guide": ("video", "V"),      # Control/guidance image (when image_mode > 0)
+    "image_mask": ("video", "A"),       # Mask image for inpainting (with V+A in video_prompt_type)
+    "custom_guide": (None, None),       # Custom guidance - always include if present (model-specific)
+}
 
 # Config key for storing custom search directories
 CONFIG_KEY_SEARCH_DIRS = "source_images_search_dirs"
@@ -111,15 +114,16 @@ def resolve_and_build_info(path):
     return info
 
 
-def process_source_paths(source_paths):
+def process_source_paths(source_paths, configs=None):
     """
     Process source paths to extract useful info and resolve originals.
     
     Args:
         source_paths: Dict mapping image keys to file paths
+        configs: Settings dict to check which inputs are actually used
         
     Returns:
-        Dict with path info for each source image
+        Dict with path info for each source image that is actually used
     """
     if not source_paths:
         return None
@@ -128,6 +132,11 @@ def process_source_paths(source_paths):
     
     for key, value in source_paths.items():
         if value is None:
+            continue
+        
+        # Skip keys that aren't used according to the settings
+        if configs is not None and not should_include_source_key(key, configs):
+            print(f"[SourceImagesPlugin] Skipping {key} - not used by current settings")
             continue
         
         # Handle list of paths
@@ -148,12 +157,53 @@ def process_source_paths(source_paths):
     return result if result else None
 
 
+def should_include_source_key(key, configs):
+    """
+    Check if a source image key should be included based on the model settings.
+    
+    Args:
+        key: The source image key (e.g., 'image_start', 'image_refs')
+        configs: The settings dict containing image_prompt_type, video_prompt_type, etc.
+        
+    Returns:
+        True if this key should be included in metadata, False otherwise
+    """
+    if key not in IMAGE_ATTACHMENT_KEYS:
+        return False
+    
+    flag_source, required_flag = IMAGE_ATTACHMENT_KEYS[key]
+    
+    # If no flag required (like custom_guide), always include if present
+    if flag_source is None:
+        return True
+    
+    # Get the appropriate prompt type
+    if flag_source == "image":
+        prompt_type = configs.get("image_prompt_type", "")
+    elif flag_source == "video":
+        prompt_type = configs.get("video_prompt_type", "")
+    else:
+        return True
+    
+    # Check if the required flag is present
+    if not prompt_type or not isinstance(prompt_type, str):
+        return False
+    
+    # Special case: image_mask requires both V and A in video_prompt_type
+    if key == "image_mask":
+        return "V" in prompt_type and "A" in prompt_type
+    
+    return required_flag in prompt_type
+
+
 def before_metadata_save_hook(configs, plugin_data=None, model_type=None, **kwargs):
     """
     Hook called before metadata is saved to output files.
     
     Adds 'source_images' key containing info about all input images used,
-    with resolved original paths when possible.
+    with resolved original paths when possible. Only includes images that
+    are actually used according to the current settings (image_prompt_type,
+    video_prompt_type).
     """
     if configs is None:
         return configs
@@ -161,8 +211,8 @@ def before_metadata_save_hook(configs, plugin_data=None, model_type=None, **kwar
     # Get source image paths from plugin_data (captured before validate_settings)
     source_paths = plugin_data.get('source_image_paths', {}) if plugin_data else {}
     
-    # Process paths and resolve originals
-    source_info = process_source_paths(source_paths)
+    # Process paths and resolve originals, filtering by what's actually used
+    source_info = process_source_paths(source_paths, configs)
     
     if source_info:
         configs['source_images'] = source_info
@@ -175,7 +225,7 @@ class SourceImagesPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Source Images Metadata"
-        self.version = "1.6.0"
+        self.version = "1.7.0"
         self.description = "Saves input image file paths in output metadata"
         
         # Request access to server_config and filename for saving
